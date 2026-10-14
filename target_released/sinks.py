@@ -120,6 +120,17 @@ class InvoicesSink(ReLeasedRecordSink):
         return payload
 
     def upsert_record(self, record: dict, context: dict):
+        total = self._invoice_total(record)
+        # Re-leased API doesn't allow invoices with a total of 0
+        if total <= 0:
+            self.logger.info(
+                "Skipping invoice with non-positive total=%s Reference=%s Type=%s",
+                total,
+                record.get("Reference"),
+                record.get("Type"),
+            )
+            return record.get("Id") or record.get("Reference"), True, {"existing": True}
+
         state_updates = {}
         method = "POST"
         if record.get("Id"):
@@ -134,6 +145,18 @@ class InvoicesSink(ReLeasedRecordSink):
             record_id = response.json()["Data"]["Id"]
 
         return record_id, True, state_updates
+
+    @staticmethod
+    def _invoice_total(record: dict) -> float:
+        for key in ("Total", "SubTotal"):
+            if record.get(key) is not None:
+                return float(record[key])
+        total = 0.0
+        for line in record.get("LineItems") or []:
+            quantity = float(line.get("Quantity") or 0)
+            unit_amount = float(line.get("UnitAmount") or 0)
+            total += quantity * unit_amount
+        return total
 
 
 class CreditNotesSink(ReLeasedRecordSink):
