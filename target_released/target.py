@@ -11,6 +11,7 @@ from target_released.sinks import (
     InvoicesSink,
     PaymentsSink,
 )
+from target_released.snapshot_upload import ensure_reference_data_marker
 
 
 class TargetReLeased(TargetHotglue):
@@ -58,6 +59,12 @@ class TargetReLeased(TargetHotglue):
             ),
         ),
     ).to_dict()
+
+    def __init__(self, *args, **kwargs) -> None:
+        """Initialize target and ensure post-export snapshot upload marker."""
+        super().__init__(*args, **kwargs)
+        snapshot_dir = self.config.get("snapshot_dir") or "snapshots"
+        ensure_reference_data_marker(snapshot_dir)
 
 
 if __name__ == "__main__":
