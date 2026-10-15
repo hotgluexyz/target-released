@@ -406,7 +406,7 @@ class PaymentsSink(ReLeasedRecordSink):
             Tuple of ``(payment_id, True, {})``.
         """
         response = self.request_api("POST", endpoint=self.endpoint, request_data=record)
-        record_id = response.json()["Data"]["Id"]
+        record_id = response.json()["Id"]
         return record_id, True, {}
 
 
