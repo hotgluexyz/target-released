@@ -70,6 +70,19 @@ class ReLeasedRecordSink(ReLeasedSink, HotglueSink):
         """
         return record
 
+    def _apply_sdk_id(self, record: dict, *, id_key: str = "Id") -> dict:
+        """Copy SDK ``id`` from id-snapshot lookup onto the ReLeased id field.
+
+        ``TargetHotglue.get_record_id`` sets lowercase ``id`` from
+        ``{stream}_{flow}.snapshot.csv``. ReLeased APIs use ``Id`` or
+        ``GlobalIdentifier``.
+        """
+        payload = dict(record)
+        sdk_id = payload.pop("id", None)
+        if sdk_id and not payload.get(id_key):
+            payload[id_key] = str(sdk_id)
+        return payload
+
     def _with_company_id(self, record: dict, *, id_key: str = "Id") -> dict:
         """Copy record and set CompanyId on create when ``id_key`` is absent.
 
