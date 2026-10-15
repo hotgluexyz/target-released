@@ -8,6 +8,10 @@ from pathlib import Path
 CONTACT_ID_MAP_CSV = "contact_id_map.csv"
 CONTACT_ID_MAP_COLUMNS = ("name", "id")
 
+# Batched writes pending disk flush, keyed by snapshot_dir.
+# SDK clean_up only runs at end-of-pipe (after Invoices), so resolve flushes first.
+_pending_by_dir: dict[str, dict[str, str]] = {}
+
 
 def _str_or_none(value: object) -> str | None:
     if value is None:
@@ -84,12 +88,53 @@ def upsert_contact_id_map_entries(snapshot_dir: str, entries: dict[str, str]) ->
     return by_name
 
 
+def _normalize_snapshot_dir(snapshot_dir: str) -> str:
+    """Return an absolute snapshot dir path for pending-map keys."""
+    return str(Path(snapshot_dir).resolve())
+
+
+def queue_contact_id_map_entries(snapshot_dir: str, entries: dict[str, str]) -> None:
+    """Queue name→Id entries to merge into contact_id_map.csv on next flush.
+
+    Args:
+        snapshot_dir: Directory containing snapshot CSVs.
+        entries: Names to set/update (e.g. DisplayName → ContactId).
+    """
+    key = _normalize_snapshot_dir(snapshot_dir)
+    pending = _pending_by_dir.setdefault(key, {})
+    for name, contact_id in entries.items():
+        clean_name = _str_or_none(name)
+        clean_id = _str_or_none(contact_id)
+        if clean_name and clean_id:
+            pending[clean_name] = clean_id
+
+
+def flush_pending_contact_id_map(snapshot_dir: str) -> dict[str, str]:
+    """Write any queued entries for ``snapshot_dir`` to contact_id_map.csv.
+
+    Args:
+        snapshot_dir: Directory containing snapshot CSVs.
+
+    Returns:
+        Entries that were flushed (empty if nothing was pending).
+    """
+    key = _normalize_snapshot_dir(snapshot_dir)
+    entries = _pending_by_dir.pop(key, None)
+    if not entries:
+        return {}
+    upsert_contact_id_map_entries(key, entries)
+    return entries
+
+
 def resolve_record_contact_id(record: dict, snapshot_dir: str) -> dict:
     """Ensure ``ContactId`` on an invoice/credit note; drop ``ContactName``.
 
     If ``ContactId`` is already set, ``ContactName`` is removed and the payload
     is returned. Otherwise looks up ``ContactName`` in contact_id_map.csv
     (populated by ContactsSink earlier in the same job on cold start).
+
+    Flushes any batched contact_id_map writes first — SDK ``clean_up`` only runs
+    at end-of-pipe, after Invoices/CreditNotes have already started.
 
     Args:
         record: Document payload that may include ContactId and/or ContactName.
@@ -101,6 +146,8 @@ def resolve_record_contact_id(record: dict, snapshot_dir: str) -> dict:
     Raises:
         ValueError: Missing both id/name, or name not found in the map.
     """
+    snapshot_dir = _normalize_snapshot_dir(snapshot_dir)
+    flush_pending_contact_id_map(snapshot_dir)
     payload = dict(record)
     contact_name = _str_or_none(payload.pop("ContactName", None))
     if payload.get("ContactId"):

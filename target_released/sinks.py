@@ -9,8 +9,9 @@ from hotglue_singer_sdk.exceptions import FatalAPIError
 
 from target_released.client import ReLeasedRecordSink
 from target_released.contact_id_map import (
+    flush_pending_contact_id_map,
+    queue_contact_id_map_entries,
     resolve_record_contact_id,
-    upsert_contact_id_map_entries,
 )
 from target_released.document_id_map import upsert_document_id_map_entries
 
@@ -47,8 +48,9 @@ class ContactsSink(ReLeasedRecordSink):
     On write, ReLeased identifies an existing contact with ``GlobalIdentifier``,
     which is the contact's API ``Id`` (from GET ``/contacts`` ``Data[].Id``).
     After successful exports, ``DisplayName`` / ``CorrespondenceName`` → Id are
-    batched (every 10 contacts, plus stream ``clean_up``) into
-    ``snapshots/contact_id_map.csv``.
+    batched (every 10 contacts) into ``snapshots/contact_id_map.csv``. Any
+    remainder is flushed on ``clean_up`` and again before invoice/credit-note
+    contact resolution (SDK ``clean_up`` only runs at end-of-pipe).
     """
 
     name = "Contacts"
@@ -64,7 +66,6 @@ class ContactsSink(ReLeasedRecordSink):
         super().__init__(*args, **kwargs)
         self._contacts_by_name: dict[str, str] | None = None
         self._exported_contacts_by_name: dict[str, str] = {}
-        self._pending_contact_id_map: dict[str, str] = {}
         self._pending_contact_exports = 0
 
     def preprocess_record(self, record: dict, context: dict) -> dict:
@@ -134,9 +135,8 @@ class ContactsSink(ReLeasedRecordSink):
 
         Entries are held until ``_CONTACT_ID_MAP_BATCH_SIZE`` contacts have been
         exported, then merged into the CSV in one write. Remaining entries are
-        flushed in ``clean_up``.
-
-        This is to increase efficiency when updating the contact_id_map.csv file.
+        flushed in ``clean_up`` and when invoices resolve ContactName (SDK
+        ``clean_up`` only runs at end-of-pipe).
 
         Args:
             payload: Contact payload that was written (uses DisplayName /
@@ -155,26 +155,26 @@ class ContactsSink(ReLeasedRecordSink):
             self._exported_contacts_by_name.update(entries)
         else:
             self._contacts_by_name.update(entries)
-        self._pending_contact_id_map.update(entries)
+        snapshot_dir = self.config.get("snapshot_dir") or "snapshots"
+        queue_contact_id_map_entries(snapshot_dir, entries)
         self._pending_contact_exports += 1
         if self._pending_contact_exports >= _CONTACT_ID_MAP_BATCH_SIZE:
             self._flush_contact_id_map()
 
     def _flush_contact_id_map(self) -> None:
         """Merge pending name→Id entries into contact_id_map.csv and clear the batch."""
-        if not self._pending_contact_id_map:
+        if self._pending_contact_exports == 0:
             return
 
         snapshot_dir = self.config.get("snapshot_dir") or "snapshots"
-        entries = self._pending_contact_id_map
-        upsert_contact_id_map_entries(snapshot_dir, entries)
-        self.logger.info(
-            "Updated contact_id_map.csv in %s for %s contact(s) (%s name keys)",
-            snapshot_dir,
-            self._pending_contact_exports,
-            len(entries),
-        )
-        self._pending_contact_id_map = {}
+        entries = flush_pending_contact_id_map(snapshot_dir)
+        if entries:
+            self.logger.info(
+                "Updated contact_id_map.csv in %s for %s contact(s) (%s name keys)",
+                snapshot_dir,
+                self._pending_contact_exports,
+                len(entries),
+            )
         self._pending_contact_exports = 0
 
     def _contact_id_for_name(
