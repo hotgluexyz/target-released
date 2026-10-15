@@ -12,6 +12,30 @@ from target_released.contact_id_map import (
     resolve_record_contact_id,
     upsert_contact_id_map_entries,
 )
+from target_released.document_id_map import upsert_document_id_map_entries
+
+# UpdateInvoiceRequest fields (swagger) — omit Type / CompanyId on PUT.
+_UPDATE_INVOICE_KEYS = (
+    "Id",
+    "ContactId",
+    "IssueDate",
+    "DueDate",
+    "Status",
+    "LineAmountTypes",
+    "LineItems",
+    "PropertyId",
+    "TenancyId",
+    "Reference",
+    "ServiceDate",
+)
+_UPDATE_INVOICE_LINE_KEYS = (
+    "Id",
+    "Description",
+    "Quantity",
+    "UnitAmount",
+    "TaxType",
+    "AccountCode",
+)
 
 
 class ContactsSink(ReLeasedRecordSink):
@@ -192,7 +216,8 @@ class InvoicesSink(ReLeasedRecordSink):
 
     Handles both sales invoices (``Type=ACCREC``) and bills (``Type=ACCPAY``).
     Resolves ``ContactId`` from ``ContactName`` via contact_id_map.csv after
-    Contacts have been exported in the same job.
+    Contacts have been exported in the same job. After a successful export,
+    QBD ``TxnID`` → ReLeased ``Id`` is written to ``document_id_map.csv``.
     """
 
     name = "Invoices"
@@ -201,9 +226,12 @@ class InvoicesSink(ReLeasedRecordSink):
     def preprocess_record(self, record: dict, context: dict) -> dict:
         """Inject CompanyId and resolve ContactId from the contact map.
 
+        Leaves ``TxnID`` on the payload for ``upsert_record`` (stripped before
+        the API call). ``Id`` is set by ETL when the document map has a hit.
+
         Args:
-            record: Invoice/bill payload. May include ``ContactName`` from ETL
-                and/or ``ContactId``. ``Id`` is the ReLeased invoice id.
+            record: Invoice/bill payload. May include ``ContactName`` / ``TxnID``
+                from ETL and/or ``ContactId`` / ``Id``.
             context: SDK batch/context dict (unused here).
 
         Returns:
@@ -214,7 +242,7 @@ class InvoicesSink(ReLeasedRecordSink):
         return resolve_record_contact_id(payload, snapshot_dir)
 
     def upsert_record(self, record: dict, context: dict) -> tuple[Any, bool, dict]:
-        """Skip non-positive totals (API rejects them); otherwise use base upsert.
+        """Skip non-positive totals; POST create or PUT update; persist Id map.
 
         Args:
             record: Invoice/bill payload after ``preprocess_record``.
@@ -224,6 +252,7 @@ class InvoicesSink(ReLeasedRecordSink):
             Tuple of ``(record_id, success, state_updates)``. Skipped rows use
             ``state_updates={"skipped": True}``.
         """
+        txn_id = record.pop("TxnID", None)
         total = self._invoice_total(record)
         if total <= 0:
             self.logger.info(
@@ -234,7 +263,52 @@ class InvoicesSink(ReLeasedRecordSink):
             )
             return record.get("Id") or record.get("Reference"), True, {"skipped": True}
 
-        return super().upsert_record(record, context)
+        state_updates: dict = {}
+        if record.get("Id"):
+            method = "PUT"
+            state_updates["is_updated"] = True
+            request_data = self._invoice_update_payload(record)
+        else:
+            method = "POST"
+            request_data = record
+
+        response = self.request_api(
+            method, endpoint=self.endpoint, request_data=request_data
+        )
+        record_id = (
+            record["Id"] if method == "PUT" else response.json()["Data"]["Id"]
+        )
+        if txn_id and record_id:
+            snapshot_dir = self.config.get("snapshot_dir") or "snapshots"
+            upsert_document_id_map_entries(snapshot_dir, {txn_id: str(record_id)})
+            self.logger.info(
+                "Updated document_id_map.csv in %s for TxnID=%s → %s",
+                snapshot_dir,
+                txn_id,
+                record_id,
+            )
+        return record_id, True, state_updates
+
+    @staticmethod
+    def _invoice_update_payload(record: dict) -> dict:
+        """Build UpdateInvoiceRequest body (no Type / CompanyId)."""
+        payload = {
+            key: record[key]
+            for key in _UPDATE_INVOICE_KEYS
+            if key in record and record[key] is not None
+        }
+        lines = payload.get("LineItems")
+        if isinstance(lines, list):
+            payload["LineItems"] = [
+                {
+                    key: line[key]
+                    for key in _UPDATE_INVOICE_LINE_KEYS
+                    if key in line and line[key] is not None
+                }
+                for line in lines
+                if isinstance(line, dict)
+            ]
+        return payload
 
     @staticmethod
     def _invoice_total(record: dict) -> float:
