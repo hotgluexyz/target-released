@@ -26,11 +26,21 @@ dev = [
 [tool.ruff]
 line-length = 100
 required-version = ">=0.15"
+exclude = [
+    ".git",
+    ".venv",
+    "venv",
+    "build",
+    "dist",
+    ".secrets",
+    "etl",
+]
 
 [tool.ruff.lint]
 future-annotations = true
 ignore = [
     "COM812",
+    "CPY001",
     "FIX002",
     "TD002",
     "TD003",
@@ -42,15 +52,25 @@ allow-star-arg-any = true
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**/*.py" = [
-  "S101",
+    "ANN",
+    "ARG",
+    "D100",
+    "D103",
+    "EM",
+    "PLC0415",
+    "PLR2004",
+    "S101",
+    "TRY003",
 ]
 "target_released/client.py" = [
     "ANN401",
-    "D102",
+    "ARG002",
     "I001",
 ]
 "target_released/sinks.py" = [
-    "D102",
+    "ANN002",
+    "ANN003",
+    "ARG002",
     "I001",
 ]
 "target_released/target.py" = [

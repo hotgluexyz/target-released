@@ -14,6 +14,11 @@ class ReLeasedAuthenticator(BearerTokenAuthenticator):
 
     @property
     def auth_headers(self) -> dict:
+        """Return Authorization headers for the ReLeased API.
+
+        Returns:
+            Dict with a Bearer ``Authorization`` header.
+        """
         return {"Authorization": f"Bearer {self._config['access_token']}"}
 
 
@@ -22,37 +27,84 @@ class ReLeasedSink(HotglueBaseSink):
 
     @property
     def base_url(self) -> str:
+        """Return the ReLeased API base URL.
+
+        Returns:
+            Configured ``api_url``, or the default production API root.
+        """
         return self.config.get("api_url", "https://api.re-leased.com/api")
 
     @property
     def authenticator(self) -> Any:
+        """Return the authenticator for outbound requests.
+
+        Returns:
+            A ``ReLeasedAuthenticator`` bound to this target.
+        """
         return ReLeasedAuthenticator(self._target)
 
     @property
     def http_headers(self) -> dict:
+        """Return extra HTTP headers for each request.
+
+        Returns:
+            Dict including a fresh ``Idempotency-Key``.
+        """
         return {"Idempotency-Key": str(uuid.uuid4())}
 
 
 class ReLeasedRecordSink(ReLeasedSink, HotglueSink):
-    """ReLeased Record target sink class for record sinks."""
+    """Record sink base. All writes are scoped to config ``company_id`` (a Company)."""
 
     name = "ReLeasedRecordSink"
 
     def preprocess_record(self, record: dict, context: dict) -> dict:
+        """Pass the record through unchanged.
+
+        Args:
+            record: Singer record payload for this stream.
+            context: SDK batch/context dict (unused here).
+
+        Returns:
+            The same ``record`` dict.
+        """
         return record
 
-    def upsert_record(self, record: dict, context: dict) -> None:
-        state_updates = {}
-        pk_field = self.key_properties[0] if self.key_properties else "id"
-        pk = record.get(pk_field)
-        method = "POST"
-        endpoint = self.endpoint
+    def _with_company_id(self, record: dict, *, id_key: str = "Id") -> dict:
+        """Copy record and set CompanyId on create when ``id_key`` is absent.
 
-        if pk:
-            method = "PATCH"
-            endpoint = f"{endpoint}{pk}"
+        Args:
+            record: Sink record (contact, invoice, credit note, etc.).
+            id_key: Field that marks an existing ReLeased row. Default ``Id``;
+                contacts use ``GlobalIdentifier`` (the contact's API ``Id``).
+
+        Returns:
+            A shallow copy of ``record``, with ``CompanyId`` set from config when
+            creating (no value at ``id_key``).
+        """
+        payload = dict(record)
+        if not payload.get(id_key):
+            payload["CompanyId"] = self.config["company_id"]
+        return payload
+
+    def upsert_record(self, record: dict, context: dict) -> tuple[Any, bool, dict]:
+        """POST to create, or PUT when ``Id`` is present (ReLeased API convention).
+
+        Args:
+            record: Already-preprocessed payload for the destination API.
+            context: SDK batch/context dict (unused here).
+
+        Returns:
+            Tuple of ``(record_id, success, state_updates)`` where ``record_id``
+            is the ReLeased ``Id``, ``success`` is always True on HTTP success,
+            and ``state_updates`` may include ``is_updated``.
+        """
+        state_updates: dict = {}
+        method = "POST"
+        if record.get("Id"):
+            method = "PUT"
             state_updates["is_updated"] = True
 
-        response = self.request_api(method, endpoint, request_data=record)
-        record_id = pk or response.json().get("id")
+        response = self.request_api(method, endpoint=self.endpoint, request_data=record)
+        record_id = record["Id"] if method == "PUT" else response.json()["Data"]["Id"]
         return record_id, True, state_updates

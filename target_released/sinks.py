@@ -1,7 +1,8 @@
-"""ReLeased target sink class, which handles writing streams."""
+"""ReLeased target sinks. Records are scoped to a Company (``company_id``)."""
 
 from __future__ import annotations
 
+from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from hotglue_singer_sdk.exceptions import FatalAPIError
@@ -10,24 +11,50 @@ from target_released.client import ReLeasedRecordSink
 
 
 class ContactsSink(ReLeasedRecordSink):
-    """Contacts sink — POST/PUT ``/contacts``."""
+    """Contacts sink — POST/PUT ``/contacts`` under the configured Company.
+
+    On write, ReLeased identifies an existing contact with ``GlobalIdentifier``,
+    which is the contact's API ``Id`` (from GET ``/contacts`` ``Data[].Id``).
+    """
 
     name = "Contacts"
     endpoint = "/contacts"
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        """Initialize sink and an unloaded company contact name→Id cache.
+
+        Args:
+            *args: Positional args forwarded to the SDK sink base.
+            **kwargs: Keyword args forwarded to the SDK sink base.
+        """
         super().__init__(*args, **kwargs)
         self._contacts_by_name: dict[str, str] | None = None
 
     def preprocess_record(self, record: dict, context: dict) -> dict:
-        """Pass through native Re-Leased fields; inject CompanyId on create."""
-        payload = dict(record)
-        if not payload.get("GlobalIdentifier"):
-            payload["CompanyId"] = self.config["company_id"]
-        return payload
+        """Inject CompanyId on create when GlobalIdentifier is absent.
 
-    def upsert_record(self, record: dict, context: dict):
-        state_updates = {}
+        Args:
+            record: Contact payload. ``GlobalIdentifier``, when set, is the
+                ReLeased contact ``Id`` used for PUT updates.
+            context: SDK batch/context dict (unused here).
+
+        Returns:
+            Payload with ``CompanyId`` set when creating a new contact.
+        """
+        return self._with_company_id(record, id_key="GlobalIdentifier")
+
+    def upsert_record(self, record: dict, context: dict) -> tuple[Any, bool, dict]:
+        """Create or update a contact; match existing rows by DisplayName when needed.
+
+        Args:
+            record: Contact payload after ``preprocess_record``. May include
+                ``GlobalIdentifier`` (ReLeased contact ``Id``) and ``DisplayName``.
+            context: SDK batch/context dict (unused here).
+
+        Returns:
+            Tuple of ``(contact_id, success, state_updates)``.
+        """
+        state_updates: dict = {}
         payload = dict(record)
 
         if not payload.get("GlobalIdentifier"):
@@ -41,15 +68,11 @@ class ContactsSink(ReLeasedRecordSink):
             return payload["GlobalIdentifier"], True, {"is_updated": True}
 
         try:
-            response = self.request_api(
-                "POST", endpoint=self.endpoint, request_data=payload
-            )
+            response = self.request_api("POST", endpoint=self.endpoint, request_data=payload)
         except FatalAPIError as exc:
             if "already exists" not in str(exc):
                 raise
-            existing_id = self._contact_id_for_name(
-                payload.get("DisplayName"), refresh=True
-            )
+            existing_id = self._contact_id_for_name(payload.get("DisplayName"), refresh=True)
             if not existing_id:
                 raise
             payload["GlobalIdentifier"] = existing_id
@@ -60,25 +83,48 @@ class ContactsSink(ReLeasedRecordSink):
         record_id = response.json()["Data"]["Id"]
         display_name = payload.get("DisplayName")
         if display_name:
-            self._contacts_by_name_map()[display_name] = record_id
+            if self._contacts_by_name is None:
+                self._contacts_by_name = {}
+            self._contacts_by_name[display_name] = record_id
         return record_id, True, state_updates
-
-    def _contacts_by_name_map(self) -> dict[str, str]:
-        if self._contacts_by_name is None:
-            self._contacts_by_name = self._load_contacts_by_name()
-        return self._contacts_by_name
 
     def _contact_id_for_name(
         self, display_name: str | None, *, refresh: bool = False
     ) -> str | None:
+        """Resolve a ReLeased contact ``Id`` from a contact name field.
+
+        Uses an in-memory cache of company contacts (``_contacts_by_name``).
+        ``_load_contacts_by_name`` runs once on first miss, then only again when
+        ``refresh=True`` (e.g. after an ``already exists`` POST error)—not once
+        per Singer record.
+
+        Args:
+            display_name: Contact name to look up, typically the record's
+                ``DisplayName`` field (the contact's display / trading name).
+            refresh: When True, reload the company contact map from the API
+                before looking up.
+
+        Returns:
+            The contact's ReLeased ``Id`` if found, otherwise ``None``.
+        """
         if not display_name:
             return None
-        if refresh:
+        if refresh or self._contacts_by_name is None:
             self._contacts_by_name = self._load_contacts_by_name()
-        return self._contacts_by_name_map().get(display_name)
+        return self._contacts_by_name.get(display_name)
 
     def _load_contacts_by_name(self) -> dict[str, str]:
-        """Page GET /contacts and index Name/DisplayName/CorrespondenceName → Id."""
+        """Page GET ``/contacts`` for this Company into a name→Id map.
+
+        Used for create-time dedupe: without ``GlobalIdentifier``, match by name
+        so we PUT with the existing contact ``Id`` instead of POSTing a duplicate.
+
+        Indexes ``Name``, ``DisplayName``, and ``CorrespondenceName`` so an ETL
+        ``DisplayName`` can match API ``Name`` when ``DisplayName`` is null.
+
+        Returns:
+            Mapping of contact name string → ReLeased contact ``Id``.
+        """
         by_name: dict[str, str] = {}
         params: dict[str, str] = {"companyId": self.config["company_id"]}
 
@@ -108,20 +154,38 @@ class ContactsSink(ReLeasedRecordSink):
 
 
 class InvoicesSink(ReLeasedRecordSink):
-    """Invoices sink — POST/PUT ``/invoices``."""
+    """Invoices sink — POST/PUT ``/invoices`` under the configured Company.
+
+    Handles both sales invoices (``Type=ACCREC``) and bills (``Type=ACCPAY``).
+    """
 
     name = "Invoices"
     endpoint = "/invoices"
 
     def preprocess_record(self, record: dict, context: dict) -> dict:
-        payload = dict(record)
-        if not payload.get("Id"):
-            payload["CompanyId"] = self.config["company_id"]
-        return payload
+        """Inject CompanyId on create when Id is absent.
 
-    def upsert_record(self, record: dict, context: dict):
+        Args:
+            record: Invoice/bill payload. ``Id`` is the ReLeased invoice id.
+            context: SDK batch/context dict (unused here).
+
+        Returns:
+            Payload with ``CompanyId`` set when creating.
+        """
+        return self._with_company_id(record)
+
+    def upsert_record(self, record: dict, context: dict) -> tuple[Any, bool, dict]:
+        """Skip non-positive totals (API rejects them); otherwise use base upsert.
+
+        Args:
+            record: Invoice/bill payload after ``preprocess_record``.
+            context: SDK batch/context dict (unused here).
+
+        Returns:
+            Tuple of ``(record_id, success, state_updates)``. Skipped rows use
+            ``state_updates={"skipped": True}``.
+        """
         total = self._invoice_total(record)
-        # Re-leased API doesn't allow invoices with a total of 0
         if total <= 0:
             self.logger.info(
                 "Skipping invoice with non-positive total=%s Reference=%s Type=%s",
@@ -129,28 +193,25 @@ class InvoicesSink(ReLeasedRecordSink):
                 record.get("Reference"),
                 record.get("Type"),
             )
-            return record.get("Id") or record.get("Reference"), True, {"existing": True}
+            return record.get("Id") or record.get("Reference"), True, {"skipped": True}
 
-        state_updates = {}
-        method = "POST"
-        if record.get("Id"):
-            method = "PUT"
-            state_updates["is_updated"] = True
-
-        response = self.request_api(method, endpoint=self.endpoint, request_data=record)
-
-        if method == "PUT":
-            record_id = record["Id"]
-        else:
-            record_id = response.json()["Data"]["Id"]
-
-        return record_id, True, state_updates
+        return super().upsert_record(record, context)
 
     @staticmethod
     def _invoice_total(record: dict) -> float:
+        """Compute the invoice total for the non-positive skip check.
+
+        Args:
+            record: Invoice/bill payload with optional ``Total`` / ``SubTotal``
+                or ``LineItems`` (``Quantity`` x ``UnitAmount``).
+
+        Returns:
+            Numeric total used to decide whether to skip the write.
+        """
         for key in ("Total", "SubTotal"):
             if record.get(key) is not None:
                 return float(record[key])
+
         total = 0.0
         for line in record.get("LineItems") or []:
             quantity = float(line.get("Quantity") or 0)
@@ -160,32 +221,22 @@ class InvoicesSink(ReLeasedRecordSink):
 
 
 class CreditNotesSink(ReLeasedRecordSink):
-    """CreditNotes sink — POST/PUT ``/credit-notes``."""
+    """CreditNotes sink — POST/PUT ``/credit-notes`` under the configured Company."""
 
     name = "CreditNotes"
     endpoint = "/credit-notes"
 
     def preprocess_record(self, record: dict, context: dict) -> dict:
-        payload = dict(record)
-        if not payload.get("Id"):
-            payload["CompanyId"] = self.config["company_id"]
-        return payload
+        """Inject CompanyId on create when Id is absent.
 
-    def upsert_record(self, record: dict, context: dict):
-        state_updates = {}
-        method = "POST"
-        if record.get("Id"):
-            method = "PUT"
-            state_updates["is_updated"] = True
+        Args:
+            record: Credit note payload. ``Id`` is the ReLeased credit note id.
+            context: SDK batch/context dict (unused here).
 
-        response = self.request_api(method, endpoint=self.endpoint, request_data=record)
-
-        if method == "PUT":
-            record_id = record["Id"]
-        else:
-            record_id = response.json()["Data"]["Id"]
-
-        return record_id, True, state_updates
+        Returns:
+            Payload with ``CompanyId`` set when creating.
+        """
+        return self._with_company_id(record)
 
 
 class PaymentsSink(ReLeasedRecordSink):
@@ -194,25 +245,41 @@ class PaymentsSink(ReLeasedRecordSink):
     name = "Payments"
     endpoint = "/payments"
 
-    def preprocess_record(self, record: dict, context: dict) -> dict:
-        return dict(record)
+    def upsert_record(self, record: dict, context: dict) -> tuple[Any, bool, dict]:
+        """Create a payment.
 
-    def upsert_record(self, record: dict, context: dict):
+        Args:
+            record: Payment payload for POST ``/payments``.
+            context: SDK batch/context dict (unused here).
+
+        Returns:
+            Tuple of ``(payment_id, True, {})``.
+        """
         response = self.request_api("POST", endpoint=self.endpoint, request_data=record)
         record_id = response.json()["Data"]["Id"]
         return record_id, True, {}
 
 
 class CreditNoteAllocationSink(ReLeasedRecordSink):
-    """CreditNoteAllocation sink — POST ``/credit-notes/{id}/allocations``."""
+    """CreditNoteAllocation sink — POST ``/credit-notes/{id}/allocations``.
+
+    Applies a credit note to one or more invoices (allocation amounts).
+    """
 
     name = "CreditNoteAllocation"
     endpoint = "/credit-notes/"
 
-    def preprocess_record(self, record: dict, context: dict) -> dict:
-        return dict(record)
+    def upsert_record(self, record: dict, context: dict) -> tuple[Any, bool, dict]:
+        """POST allocations for a credit note.
 
-    def upsert_record(self, record: dict, context: dict):
+        Args:
+            record: Must include ``CreditNoteId`` (ReLeased credit note ``Id``)
+                and ``Allocations`` (list of allocation objects).
+            context: SDK batch/context dict (unused here).
+
+        Returns:
+            Tuple of ``(allocation_or_credit_note_id, True, {})``.
+        """
         credit_note_id = record["CreditNoteId"]
         payload = {"Allocations": record["Allocations"]}
         endpoint = f"{self.endpoint}{credit_note_id}/allocations"
