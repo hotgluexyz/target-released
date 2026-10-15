@@ -63,6 +63,7 @@ class ContactsSink(ReLeasedRecordSink):
         """
         super().__init__(*args, **kwargs)
         self._contacts_by_name: dict[str, str] | None = None
+        self._exported_contacts_by_name: dict[str, str] = {}
         self._pending_contact_id_map: dict[str, str] = {}
         self._pending_contact_exports = 0
 
@@ -151,8 +152,9 @@ class ContactsSink(ReLeasedRecordSink):
             return
 
         if self._contacts_by_name is None:
-            self._contacts_by_name = {}
-        self._contacts_by_name.update(entries)
+            self._exported_contacts_by_name.update(entries)
+        else:
+            self._contacts_by_name.update(entries)
         self._pending_contact_id_map.update(entries)
         self._pending_contact_exports += 1
         if self._pending_contact_exports >= _CONTACT_ID_MAP_BATCH_SIZE:
@@ -197,7 +199,10 @@ class ContactsSink(ReLeasedRecordSink):
         if not display_name:
             return None
         if refresh or self._contacts_by_name is None:
-            self._contacts_by_name = self._load_contacts_by_name()
+            loaded = self._load_contacts_by_name()
+            loaded.update(self._exported_contacts_by_name)
+            self._exported_contacts_by_name.clear()
+            self._contacts_by_name = loaded
         return self._contacts_by_name.get(display_name)
 
     def _load_contacts_by_name(self) -> dict[str, str]:
