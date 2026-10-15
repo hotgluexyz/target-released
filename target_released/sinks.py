@@ -8,6 +8,7 @@ from urllib.parse import parse_qs, urlparse
 from hotglue_singer_sdk.exceptions import FatalAPIError
 
 from target_released.client import ReLeasedRecordSink
+from target_released.contact_id_map import upsert_contact_id_map_entries
 
 
 class ContactsSink(ReLeasedRecordSink):
@@ -15,6 +16,8 @@ class ContactsSink(ReLeasedRecordSink):
 
     On write, ReLeased identifies an existing contact with ``GlobalIdentifier``,
     which is the contact's API ``Id`` (from GET ``/contacts`` ``Data[].Id``).
+    After a successful export, ``DisplayName`` / ``CorrespondenceName`` → Id are
+    written to ``snapshots/contact_id_map.csv`` when ``snapshot_dir`` is set.
     """
 
     name = "Contacts"
@@ -65,7 +68,9 @@ class ContactsSink(ReLeasedRecordSink):
 
         if payload.get("GlobalIdentifier"):
             self.request_api("PUT", endpoint=self.endpoint, request_data=payload)
-            return payload["GlobalIdentifier"], True, {"is_updated": True}
+            contact_id = payload["GlobalIdentifier"]
+            self._remember_exported_contact(payload, contact_id)
+            return contact_id, True, {"is_updated": True}
 
         try:
             response = self.request_api("POST", endpoint=self.endpoint, request_data=payload)
@@ -78,15 +83,41 @@ class ContactsSink(ReLeasedRecordSink):
             payload["GlobalIdentifier"] = existing_id
             payload.pop("CompanyId", None)
             self.request_api("PUT", endpoint=self.endpoint, request_data=payload)
+            self._remember_exported_contact(payload, existing_id)
             return existing_id, True, {"is_updated": True}
 
         record_id = response.json()["Data"]["Id"]
-        display_name = payload.get("DisplayName")
-        if display_name:
-            if self._contacts_by_name is None:
-                self._contacts_by_name = {}
-            self._contacts_by_name[display_name] = record_id
+        self._remember_exported_contact(payload, record_id)
         return record_id, True, state_updates
+
+    def _remember_exported_contact(self, payload: dict, contact_id: str) -> None:
+        """Update in-memory cache and contact_id_map.csv after a successful export.
+
+        Args:
+            payload: Contact payload that was written (uses DisplayName /
+                CorrespondenceName as map keys).
+            contact_id: ReLeased contact ``Id`` returned from create/update.
+        """
+        names = {
+            payload.get("DisplayName"),
+            payload.get("CorrespondenceName"),
+        }
+        entries = {name: contact_id for name in names if name}
+        if not entries:
+            return
+
+        if self._contacts_by_name is None:
+            self._contacts_by_name = {}
+        self._contacts_by_name.update(entries)
+
+        snapshot_dir = self.config.get("snapshot_dir") or "snapshots"
+        upsert_contact_id_map_entries(snapshot_dir, entries)
+        self.logger.info(
+            "Updated contact_id_map.csv in %s for %s → %s",
+            snapshot_dir,
+            sorted(entries),
+            contact_id,
+        )
 
     def _contact_id_for_name(
         self, display_name: str | None, *, refresh: bool = False

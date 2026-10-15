@@ -47,6 +47,16 @@ class TargetReLeased(TargetHotglue):
                 "Each Company has a name and ID; records are created under this Company."
             ),
         ),
+        th.Property(
+            "snapshot_dir",
+            th.StringType,
+            default="snapshots",
+            description=(
+                "Flow-level snapshot directory for CSVs such as contact_id_map.csv. "
+                "Defaults to 'snapshots' (hotglue job/flow working dir); "
+                "hotglue may inject an absolute path at runtime."
+            ),
+        ),
     ).to_dict()
 
 
