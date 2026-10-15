@@ -301,12 +301,8 @@ class InvoicesSink(ReLeasedRecordSink):
             method = "POST"
             request_data = record
 
-        response = self.request_api(
-            method, endpoint=self.endpoint, request_data=request_data
-        )
-        record_id = (
-            record["Id"] if method == "PUT" else response.json()["Data"]["Id"]
-        )
+        response = self.request_api(method, endpoint=self.endpoint, request_data=request_data)
+        record_id = record["Id"] if method == "PUT" else response.json()["Data"]["Id"]
         if txn_id and record_id:
             snapshot_dir = self.config.get("snapshot_dir") or "snapshots"
             upsert_document_id_map_entries(snapshot_dir, {txn_id: str(record_id)})

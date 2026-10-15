@@ -59,9 +59,7 @@ def write_document_id_map(snapshot_dir: str, by_txn: dict[str, str]) -> None:
             writer.writerow({"txn_id": txn_id, "id": doc_id})
 
 
-def upsert_document_id_map_entries(
-    snapshot_dir: str, entries: dict[str, str]
-) -> dict[str, str]:
+def upsert_document_id_map_entries(snapshot_dir: str, entries: dict[str, str]) -> dict[str, str]:
     """Merge TxnID→Id entries into document_id_map.csv and persist if changed.
 
     Args:
