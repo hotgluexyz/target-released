@@ -26,7 +26,7 @@ If MCP is unavailable, use the doc index at `https://docs.hotglue.com/llms.txt` 
 | Path | Role |
 | --- | --- |
 | `sync-output/` | Input from tap (CSV/Parquet per stream) |
-| `snapshots/` | Tenant snapshots: `tenant-config.json`, `contact_id_map.csv` (name,id) |
+| `snapshots/` | Tenant snapshots: `tenant-config.json`, `contact_id_map.csv` (name,id), `document_id_map.csv` (txn_id,id for invoices/bills) |
 | `etl-output/` | Script output for the target (e.g. Singer) |
 | `catalog.json` | Singer catalog (job artifact; gitignored) |
 
