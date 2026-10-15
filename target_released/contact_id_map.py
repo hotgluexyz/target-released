@@ -82,3 +82,35 @@ def upsert_contact_id_map_entries(snapshot_dir: str, entries: dict[str, str]) ->
     if changed:
         write_contact_id_map(snapshot_dir, by_name)
     return by_name
+
+
+def resolve_record_contact_id(record: dict, snapshot_dir: str) -> dict:
+    """Ensure ``ContactId`` on an invoice/credit note; drop ``ContactName``.
+
+    If ``ContactId`` is already set, ``ContactName`` is removed and the payload
+    is returned. Otherwise looks up ``ContactName`` in contact_id_map.csv
+    (populated by ContactsSink earlier in the same job on cold start).
+
+    Args:
+        record: Document payload that may include ContactId and/or ContactName.
+        snapshot_dir: Directory containing contact_id_map.csv.
+
+    Returns:
+        Copy of ``record`` with ``ContactId`` set and ``ContactName`` removed.
+
+    Raises:
+        ValueError: Missing both id/name, or name not found in the map.
+    """
+    payload = dict(record)
+    contact_name = _str_or_none(payload.pop("ContactName", None))
+    if payload.get("ContactId"):
+        return payload
+    if not contact_name:
+        msg = "Document missing ContactId and ContactName"
+        raise ValueError(msg)
+    contact_id = read_contact_id_map(snapshot_dir).get(contact_name)
+    if not contact_id:
+        msg = f"No ContactId in contact_id_map.csv for ContactName={contact_name!r}"
+        raise ValueError(msg)
+    payload["ContactId"] = contact_id
+    return payload

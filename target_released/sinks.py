@@ -8,7 +8,10 @@ from urllib.parse import parse_qs, urlparse
 from hotglue_singer_sdk.exceptions import FatalAPIError
 
 from target_released.client import ReLeasedRecordSink
-from target_released.contact_id_map import upsert_contact_id_map_entries
+from target_released.contact_id_map import (
+    resolve_record_contact_id,
+    upsert_contact_id_map_entries,
+)
 
 
 class ContactsSink(ReLeasedRecordSink):
@@ -188,22 +191,27 @@ class InvoicesSink(ReLeasedRecordSink):
     """Invoices sink — POST/PUT ``/invoices`` under the configured Company.
 
     Handles both sales invoices (``Type=ACCREC``) and bills (``Type=ACCPAY``).
+    Resolves ``ContactId`` from ``ContactName`` via contact_id_map.csv after
+    Contacts have been exported in the same job.
     """
 
     name = "Invoices"
     endpoint = "/invoices"
 
     def preprocess_record(self, record: dict, context: dict) -> dict:
-        """Inject CompanyId on create when Id is absent.
+        """Inject CompanyId and resolve ContactId from the contact map.
 
         Args:
-            record: Invoice/bill payload. ``Id`` is the ReLeased invoice id.
+            record: Invoice/bill payload. May include ``ContactName`` from ETL
+                and/or ``ContactId``. ``Id`` is the ReLeased invoice id.
             context: SDK batch/context dict (unused here).
 
         Returns:
-            Payload with ``CompanyId`` set when creating.
+            Payload ready for upsert (ContactName removed; ContactId set).
         """
-        return self._with_company_id(record)
+        payload = self._with_company_id(record)
+        snapshot_dir = self.config.get("snapshot_dir") or "snapshots"
+        return resolve_record_contact_id(payload, snapshot_dir)
 
     def upsert_record(self, record: dict, context: dict) -> tuple[Any, bool, dict]:
         """Skip non-positive totals (API rejects them); otherwise use base upsert.
@@ -252,22 +260,29 @@ class InvoicesSink(ReLeasedRecordSink):
 
 
 class CreditNotesSink(ReLeasedRecordSink):
-    """CreditNotes sink — POST/PUT ``/credit-notes`` under the configured Company."""
+    """CreditNotes sink — POST/PUT ``/credit-notes`` under the configured Company.
+
+    Resolves ``ContactId`` from ``ContactName`` via contact_id_map.csv after
+    Contacts have been exported in the same job.
+    """
 
     name = "CreditNotes"
     endpoint = "/credit-notes"
 
     def preprocess_record(self, record: dict, context: dict) -> dict:
-        """Inject CompanyId on create when Id is absent.
+        """Inject CompanyId and resolve ContactId from the contact map.
 
         Args:
-            record: Credit note payload. ``Id`` is the ReLeased credit note id.
+            record: Credit note payload. May include ``ContactName`` from ETL
+                and/or ``ContactId``. ``Id`` is the ReLeased credit note id.
             context: SDK batch/context dict (unused here).
 
         Returns:
-            Payload with ``CompanyId`` set when creating.
+            Payload ready for upsert (ContactName removed; ContactId set).
         """
-        return self._with_company_id(record)
+        payload = self._with_company_id(record)
+        snapshot_dir = self.config.get("snapshot_dir") or "snapshots"
+        return resolve_record_contact_id(payload, snapshot_dir)
 
 
 class PaymentsSink(ReLeasedRecordSink):
