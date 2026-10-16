@@ -42,7 +42,10 @@ class TargetReLeased(TargetHotglue):
             "company_id",
             th.StringType,
             required=True,
-            description="Company ID used when creating contacts and related records",
+            description=(
+                "ReLeased Company ID that scopes all target writes. "
+                "Each Company has a name and ID; records are created under this Company."
+            ),
         ),
     ).to_dict()
 
