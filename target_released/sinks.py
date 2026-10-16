@@ -9,29 +9,6 @@ from hotglue_singer_sdk.exceptions import FatalAPIError
 
 from target_released.client import ReLeasedRecordSink
 
-# UpdateInvoiceRequest fields (swagger) — omit Type / CompanyId on PUT.
-_UPDATE_INVOICE_KEYS = (
-    "Id",
-    "ContactId",
-    "IssueDate",
-    "DueDate",
-    "Status",
-    "LineAmountTypes",
-    "LineItems",
-    "PropertyId",
-    "TenancyId",
-    "Reference",
-    "ServiceDate",
-)
-_UPDATE_INVOICE_LINE_KEYS = (
-    "Id",
-    "Description",
-    "Quantity",
-    "UnitAmount",
-    "TaxType",
-    "AccountCode",
-)
-
 # SDK relation_fields: ETL sets ContactId to QBD ListID (Contacts.externalId).
 _CONTACT_RELATION = [{"field": "ContactId", "objectName": "Contacts"}]
 
@@ -152,9 +129,10 @@ class ContactsSink(ReLeasedRecordSink):
 
 
 class InvoicesSink(ReLeasedRecordSink):
-    """Invoices sink — POST/PUT ``/invoices`` under the configured Company.
+    """Invoices sink — POST ``/invoices`` only (create; no updates).
 
-    ``externalId`` is QBD TxnID; SDK snapshots drive warm-start ``id`` → ``Id``.
+    Covers both ACCREC (QBD invoices) and ACCPAY (QBD bills). ``externalId`` is
+    QBD TxnID; SDK snapshots map to ``Id`` so re-exports count as existing.
     ``ContactId`` arrives as contact ListID and is resolved via ``relation_fields``.
     """
 
@@ -168,7 +146,16 @@ class InvoicesSink(ReLeasedRecordSink):
         return self._with_company_id(payload)
 
     def upsert_record(self, record: dict, context: dict) -> tuple[Any, bool, dict]:
-        """Skip non-positive totals; POST create or PUT update."""
+        """Skip non-positive totals and already-exported rows; POST create only."""
+        if record.get("Id"):
+            self.logger.info(
+                "Skipping invoice already exported Id=%s Reference=%s Type=%s",
+                record.get("Id"),
+                record.get("Reference"),
+                record.get("Type"),
+            )
+            return record["Id"], True, {"existing": True}
+
         total = self._invoice_total(record)
         if total <= 0:
             self.logger.info(
@@ -177,41 +164,10 @@ class InvoicesSink(ReLeasedRecordSink):
                 record.get("Reference"),
                 record.get("Type"),
             )
-            return record.get("Id") or record.get("Reference"), True, {"skipped": True}
+            return record.get("Reference"), True, {"skipped": True}
 
-        state_updates: dict = {}
-        if record.get("Id"):
-            method = "PUT"
-            state_updates["is_updated"] = True
-            request_data = self._invoice_update_payload(record)
-        else:
-            method = "POST"
-            request_data = record
-
-        response = self.request_api(method, endpoint=self.endpoint, request_data=request_data)
-        record_id = record["Id"] if method == "PUT" else response.json()["Data"]["Id"]
-        return record_id, True, state_updates
-
-    @staticmethod
-    def _invoice_update_payload(record: dict) -> dict:
-        """Build UpdateInvoiceRequest body (no Type / CompanyId)."""
-        payload = {
-            key: record[key]
-            for key in _UPDATE_INVOICE_KEYS
-            if key in record and record[key] is not None
-        }
-        lines = payload.get("LineItems")
-        if isinstance(lines, list):
-            payload["LineItems"] = [
-                {
-                    key: line[key]
-                    for key in _UPDATE_INVOICE_LINE_KEYS
-                    if key in line and line[key] is not None
-                }
-                for line in lines
-                if isinstance(line, dict)
-            ]
-        return payload
+        response = self.request_api("POST", endpoint=self.endpoint, request_data=record)
+        return response.json()["Data"]["Id"], True, {}
 
     @staticmethod
     def _invoice_total(record: dict) -> float:
@@ -229,7 +185,7 @@ class InvoicesSink(ReLeasedRecordSink):
 
 
 class CreditNotesSink(ReLeasedRecordSink):
-    """CreditNotes sink — POST/PUT ``/credit-notes`` under the configured Company."""
+    """CreditNotes sink — POST ``/credit-notes`` only (create; no updates)."""
 
     name = "CreditNotes"
     endpoint = "/credit-notes"
@@ -239,6 +195,19 @@ class CreditNotesSink(ReLeasedRecordSink):
         """Map SDK ``id`` → ``Id`` and inject CompanyId on create."""
         payload = self._apply_sdk_id(record)
         return self._with_company_id(payload)
+
+    def upsert_record(self, record: dict, context: dict) -> tuple[Any, bool, dict]:
+        """Skip already-exported rows; POST create only."""
+        if record.get("Id"):
+            self.logger.info(
+                "Skipping credit note already exported Id=%s Reference=%s",
+                record.get("Id"),
+                record.get("Reference"),
+            )
+            return record["Id"], True, {"existing": True}
+
+        response = self.request_api("POST", endpoint=self.endpoint, request_data=record)
+        return response.json()["Data"]["Id"], True, {}
 
 
 class PaymentsSink(ReLeasedRecordSink):
