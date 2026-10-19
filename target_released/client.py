@@ -29,10 +29,10 @@ class ReLeasedSink(HotglueBaseSink):
     def base_url(self) -> str:
         """Return the ReLeased API base URL.
 
-        Returns:
-            Configured ``api_url``, or the default production API root.
+        Hardcoded so Hotglue OAuth ``api_url`` (entity auth callback) cannot
+        override the destination host.
         """
-        return self.config.get("api_url", "https://api.re-leased.com/api")
+        return "https://api.re-leased.com/api"
 
     @property
     def authenticator(self) -> Any:
