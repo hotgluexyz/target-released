@@ -5,8 +5,45 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
+import requests
+from hotglue_singer_sdk.exceptions import FatalAPIError, RetriableAPIError
 from hotglue_singer_sdk.target_sdk.auth import BearerTokenAuthenticator
 from hotglue_singer_sdk.target_sdk.client import HotglueBaseSink, HotglueSink
+
+
+def format_released_api_error(response: requests.Response) -> str:
+    """Prefer Re-Leased ``Errors[].Code/Message`` over empty ``Detail`` JSON."""
+    text = (response.text or "").strip()
+    try:
+        body = response.json()
+    except ValueError:
+        return text or response.reason or f"HTTP {response.status_code}"
+
+    if not isinstance(body, dict):
+        return text or response.reason or f"HTTP {response.status_code}"
+
+    parts: list[str] = []
+    for err in body.get("Errors") or []:
+        if not isinstance(err, dict):
+            continue
+        code = err.get("Code")
+        message = err.get("Message")
+        if code and message:
+            parts.append(f"{code}: {message}")
+        elif message:
+            parts.append(str(message))
+        elif code:
+            parts.append(str(code))
+    if parts:
+        return "; ".join(parts)
+
+    detail = body.get("Detail")
+    title = body.get("Title")
+    if detail:
+        return f"{title}: {detail}" if title else str(detail)
+    if title:
+        return str(title)
+    return text or response.reason or f"HTTP {response.status_code}"
 
 
 class ReLeasedAuthenticator(BearerTokenAuthenticator):
@@ -51,6 +88,13 @@ class ReLeasedSink(HotglueBaseSink):
             Dict including a fresh ``Idempotency-Key``.
         """
         return {"Idempotency-Key": str(uuid.uuid4())}
+
+    def validate_response(self, response: requests.Response) -> None:
+        """Raise with Re-Leased ``Errors[].Message`` (e.g. overpayment) visible."""
+        if response.status_code in [429] or 500 <= response.status_code < 600:
+            raise RetriableAPIError(self.response_error_message(response), response)
+        if 400 <= response.status_code < 500:
+            raise FatalAPIError(format_released_api_error(response))
 
 
 class ReLeasedRecordSink(ReLeasedSink, HotglueSink):
