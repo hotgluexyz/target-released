@@ -3,25 +3,22 @@
 from __future__ import annotations
 
 import uuid
-from typing import Any
+from http import HTTPStatus
+from typing import TYPE_CHECKING, Any
 
-import requests
 from hotglue_singer_sdk.exceptions import FatalAPIError, RetriableAPIError
 from hotglue_singer_sdk.target_sdk.auth import BearerTokenAuthenticator
 from hotglue_singer_sdk.target_sdk.client import HotglueBaseSink, HotglueSink
 
+if TYPE_CHECKING:
+    import requests
 
-def format_released_api_error(response: requests.Response) -> str:
-    """Prefer Re-Leased ``Errors[].Code/Message`` over empty ``Detail`` JSON."""
-    text = (response.text or "").strip()
-    try:
-        body = response.json()
-    except ValueError:
-        return text or response.reason or f"HTTP {response.status_code}"
 
-    if not isinstance(body, dict):
-        return text or response.reason or f"HTTP {response.status_code}"
+def _http_error_fallback(response: requests.Response, text: str) -> str:
+    return text or response.reason or f"HTTP {response.status_code}"
 
+
+def _format_released_errors(body: dict) -> list[str]:
     parts: list[str] = []
     for err in body.get("Errors") or []:
         if not isinstance(err, dict):
@@ -34,6 +31,21 @@ def format_released_api_error(response: requests.Response) -> str:
             parts.append(str(message))
         elif code:
             parts.append(str(code))
+    return parts
+
+
+def format_released_api_error(response: requests.Response) -> str:
+    """Prefer Re-Leased ``Errors[].Code/Message`` over empty ``Detail`` JSON."""
+    text = (response.text or "").strip()
+    try:
+        body = response.json()
+    except ValueError:
+        return _http_error_fallback(response, text)
+
+    if not isinstance(body, dict):
+        return _http_error_fallback(response, text)
+
+    parts = _format_released_errors(body)
     if parts:
         return "; ".join(parts)
 
@@ -43,7 +55,7 @@ def format_released_api_error(response: requests.Response) -> str:
         return f"{title}: {detail}" if title else str(detail)
     if title:
         return str(title)
-    return text or response.reason or f"HTTP {response.status_code}"
+    return _http_error_fallback(response, text)
 
 
 class ReLeasedAuthenticator(BearerTokenAuthenticator):
@@ -91,9 +103,12 @@ class ReLeasedSink(HotglueBaseSink):
 
     def validate_response(self, response: requests.Response) -> None:
         """Raise with Re-Leased ``Errors[].Message`` (e.g. overpayment) visible."""
-        if response.status_code in [429] or 500 <= response.status_code < 600:
+        if (
+            response.status_code == HTTPStatus.TOO_MANY_REQUESTS
+            or response.status_code >= HTTPStatus.INTERNAL_SERVER_ERROR
+        ):
             raise RetriableAPIError(self.response_error_message(response), response)
-        if 400 <= response.status_code < 500:
+        if HTTPStatus.BAD_REQUEST <= response.status_code < HTTPStatus.INTERNAL_SERVER_ERROR:
             raise FatalAPIError(format_released_api_error(response))
 
 

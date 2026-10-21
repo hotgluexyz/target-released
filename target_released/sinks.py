@@ -240,19 +240,18 @@ class PaymentsSink(ReLeasedRecordSink):
             return record["Id"], True, {"existing": True}
 
         try:
-            response = self.request_api(
-                "POST", endpoint=self.endpoint, request_data=record
-            )
+            response = self.request_api("POST", endpoint=self.endpoint, request_data=record)
         except FatalAPIError as exc:
             # Surface API codes like payment_exceeds_payable_amount with record context.
-            raise FatalAPIError(
+            msg = (
                 "Payment rejected "
                 f"InvoiceId={record.get('InvoiceId')!r} "
                 f"Amount={record.get('Amount')!r} "
                 f"AccountCode={record.get('AccountCode')!r} "
                 f"Reference={record.get('Reference')!r} "
                 f"externalId={record.get('externalId')!r}: {exc}"
-            ) from exc
+            )
+            raise FatalAPIError(msg) from exc
 
         body = response.json()
         # Live API wraps create in ``Data``; swagger examples sometimes omit it.
