@@ -33,12 +33,6 @@ class TargetReLeased(TargetHotglue):
             description="Long-lived Bearer access token for the Released API",
         ),
         th.Property(
-            "api_url",
-            th.StringType,
-            description="Base URL for the Released API",
-            default="https://api.re-leased.com/api",
-        ),
-        th.Property(
             "company_id",
             th.StringType,
             required=True,

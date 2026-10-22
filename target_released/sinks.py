@@ -9,8 +9,9 @@ from hotglue_singer_sdk.exceptions import FatalAPIError
 
 from target_released.client import ReLeasedRecordSink
 
-# SDK relation_fields: ETL sets ContactId to QBD ListID (Contacts.externalId).
+# SDK relation_fields: ETL sets ContactId / InvoiceId to QBD externalIds.
 _CONTACT_RELATION = [{"field": "ContactId", "objectName": "Contacts"}]
+_INVOICE_RELATION = [{"field": "InvoiceId", "objectName": "Invoices"}]
 
 
 class ContactsSink(ReLeasedRecordSink):
@@ -211,16 +212,52 @@ class CreditNotesSink(ReLeasedRecordSink):
 
 
 class PaymentsSink(ReLeasedRecordSink):
-    """Payments sink — POST ``/payments`` (create only)."""
+    """Payments sink — POST ``/payments`` only (create; no updates).
+
+    ``InvoiceId`` arrives as the related QBD bill/invoice TxnID and is resolved
+    via ``relation_fields`` to a Re-Leased invoice uuid. ``externalId`` is
+    ``{paymentTxnId}:{appliedTxnId}`` so multi-application payments snapshot
+    cleanly. CreatePayment does not take CompanyId (invoice scopes the company).
+    """
 
     name = "Payments"
     endpoint = "/payments"
+    relation_fields = _INVOICE_RELATION
+
+    def preprocess_record(self, record: dict, context: dict) -> dict:
+        """Map SDK ``id`` → ``Id`` for already-exported payments."""
+        return self._apply_sdk_id(record)
 
     def upsert_record(self, record: dict, context: dict) -> tuple[Any, bool, dict]:
-        """Create a payment."""
-        response = self.request_api("POST", endpoint=self.endpoint, request_data=record)
-        record_id = response.json()["Id"]
-        return record_id, True, {}
+        """Skip already-exported rows; POST create only."""
+        if record.get("Id"):
+            self.logger.info(
+                "Skipping payment already exported Id=%s InvoiceId=%s Reference=%s",
+                record.get("Id"),
+                record.get("InvoiceId"),
+                record.get("Reference"),
+            )
+            return record["Id"], True, {"existing": True}
+
+        try:
+            response = self.request_api("POST", endpoint=self.endpoint, request_data=record)
+        except FatalAPIError as exc:
+            # Surface API codes like payment_exceeds_payable_amount with record context.
+            msg = (
+                "Payment rejected "
+                f"InvoiceId={record.get('InvoiceId')!r} "
+                f"Amount={record.get('Amount')!r} "
+                f"AccountCode={record.get('AccountCode')!r} "
+                f"Reference={record.get('Reference')!r} "
+                f"externalId={record.get('externalId')!r}: {exc}"
+            )
+            raise FatalAPIError(msg) from exc
+
+        body = response.json()
+        # Live API wraps create in ``Data``; swagger examples sometimes omit it.
+        if isinstance(body.get("Data"), dict) and body["Data"].get("Id"):
+            return body["Data"]["Id"], True, {}
+        return body["Id"], True, {}
 
 
 class CreditNoteAllocationSink(ReLeasedRecordSink):
