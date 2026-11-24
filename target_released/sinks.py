@@ -1,4 +1,4 @@
-"""ReLeased target sinks. Records are scoped to a Company (``company_id``)."""
+"""ReLeased target sinks. Records are scoped to a Company (company_id)."""
 
 from __future__ import annotations
 
@@ -9,18 +9,177 @@ from hotglue_singer_sdk.exceptions import FatalAPIError
 
 from target_released.client import ReLeasedRecordSink
 
-# SDK relation_fields: ETL sets ContactId / InvoiceId to QBD externalIds.
+# SDK relation_fields: ETL sets ContactId / InvoiceId / TaxTypeId to externalIds.
 _CONTACT_RELATION = [{"field": "ContactId", "objectName": "Contacts"}]
 _INVOICE_RELATION = [{"field": "InvoiceId", "objectName": "Invoices"}]
+_TAX_TYPE_RELATION = [{"field": "TaxTypeId", "objectName": "TaxTypes"}]
+
+
+def _load_ids_by_code(sink: ReLeasedRecordSink, endpoint: str) -> dict[str, str]:
+    """Page GET endpoint for this Company into a case-insensitive Code→Id map."""
+    by_code: dict[str, str] = {}
+    params: dict[str, str] = sink._company_params()
+
+    while True:
+        response = sink.request_api("GET", endpoint=endpoint, params=dict(params))
+        body = response.json()
+        for row in body.get("Data") or []:
+            code = row.get("Code")
+            row_id = row.get("Id")
+            if code and row_id:
+                by_code[str(code).casefold()] = row_id
+
+        next_url = (body.get("MetaData") or {}).get("NextPageUrl")
+        if not next_url:
+            break
+        query = parse_qs(urlparse(next_url).query)
+        from_id = (query.get("fromId") or [None])[0]
+        if not from_id:
+            break
+        params = {**sink._company_params(), "fromId": from_id}
+
+    return by_code
+
+
+class TaxTypesSink(ReLeasedRecordSink):
+    """TaxTypes sink — POST /TaxTypes (create-only; skip existing Code)."""
+
+    name = "TaxTypes"
+    endpoint = "/TaxTypes"
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._by_code: dict[str, str] | None = None
+
+    def preprocess_record(self, record: dict, context: dict) -> dict:
+        """Map SDK id → Id; company is query-scoped (not in body)."""
+        return self._apply_sdk_id(record)
+
+    def upsert_record(self, record: dict, context: dict) -> tuple[Any, bool, dict]:
+        """Skip snapshot Id / existing Code; else POST with companyId query."""
+        if record.get("Id"):
+            self.logger.info(
+                "Skipping tax type already exported Id=%s Code=%s",
+                record.get("Id"),
+                record.get("Code"),
+            )
+            return record["Id"], True, {"existing": True}
+
+        existing_id = self._id_for_code(record.get("Code"))
+        if existing_id:
+            self.logger.info(
+                "Skipping tax type already in company Id=%s Code=%s",
+                existing_id,
+                record.get("Code"),
+            )
+            return existing_id, True, {"existing": True}
+
+        payload = {
+            "Code": record["Code"],
+            "Name": record["Name"],
+            "Rate": record["Rate"],
+            "CanApplyToAssets": record.get("CanApplyToAssets", True),
+            "CanApplyToEquity": record.get("CanApplyToEquity", True),
+            "CanApplyToExpenses": record.get("CanApplyToExpenses", True),
+            "CanApplyToLiabilities": record.get("CanApplyToLiabilities", True),
+            "CanApplyToRevenue": record.get("CanApplyToRevenue", True),
+        }
+        response = self.request_api(
+            "POST",
+            endpoint=self.endpoint,
+            params=self._company_params(),
+            request_data=payload,
+        )
+        record_id = response.json()["Data"]["Id"]
+        if self._by_code is not None and record.get("Code"):
+            self._by_code[str(record["Code"]).casefold()] = record_id
+        return record_id, True, {}
+
+    def _id_for_code(self, code: str | None) -> str | None:
+        if not code:
+            return None
+        if self._by_code is None:
+            self._by_code = _load_ids_by_code(self, self.endpoint)
+        return self._by_code.get(str(code).casefold())
+
+
+class AccountsSink(ReLeasedRecordSink):
+    """Accounts sink — POST /accounts (create-only; skip existing Code / BANK)."""
+
+    name = "Accounts"
+    endpoint = "/accounts"
+    relation_fields = _TAX_TYPE_RELATION
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._by_code: dict[str, str] | None = None
+
+    def preprocess_record(self, record: dict, context: dict) -> dict:
+        """Map SDK id → Id; drop TaxTypeCode; company is query-scoped."""
+        payload = self._apply_sdk_id(record)
+        payload.pop("TaxTypeCode", None)
+        return payload
+
+    def upsert_record(self, record: dict, context: dict) -> tuple[Any, bool, dict]:
+        """Skip BANK, snapshot Id, or existing Code; else POST with companyId query."""
+        if record.get("Type") == "BANK":
+            self.logger.info(
+                "Skipping BANK account Code=%s Name=%s (API rejects BANK create)",
+                record.get("Code"),
+                record.get("Name"),
+            )
+            return record.get("Code"), True, {"skipped": True}
+
+        if record.get("Id"):
+            self.logger.info(
+                "Skipping account already exported Id=%s Code=%s",
+                record.get("Id"),
+                record.get("Code"),
+            )
+            return record["Id"], True, {"existing": True}
+
+        existing_id = self._id_for_code(record.get("Code"))
+        if existing_id:
+            self.logger.info(
+                "Skipping account already in company Id=%s Code=%s",
+                existing_id,
+                record.get("Code"),
+            )
+            return existing_id, True, {"existing": True}
+
+        payload = {
+            "Code": record["Code"],
+            "Name": record["Name"],
+            "Type": record["Type"],
+            "TaxTypeId": record["TaxTypeId"],
+            "EnablePaymentsToAccount": record.get("EnablePaymentsToAccount", False),
+        }
+        response = self.request_api(
+            "POST",
+            endpoint=self.endpoint,
+            params=self._company_params(),
+            request_data=payload,
+        )
+        record_id = response.json()["Data"]["Id"]
+        if self._by_code is not None and record.get("Code"):
+            self._by_code[str(record["Code"]).casefold()] = record_id
+        return record_id, True, {}
+
+    def _id_for_code(self, code: str | None) -> str | None:
+        if not code:
+            return None
+        if self._by_code is None:
+            self._by_code = _load_ids_by_code(self, self.endpoint)
+        return self._by_code.get(str(code).casefold())
 
 
 class ContactsSink(ReLeasedRecordSink):
-    """Contacts sink — POST/PUT ``/contacts`` under the configured Company.
+    """Contacts sink — POST/PUT /contacts under the configured Company.
 
-    Warm-start: SDK ``get_record_id`` sets ``id`` from
-    ``Contacts_{flow}.snapshot.csv`` (InputId = QBD ListID). Cold-start /
+    Warm-start: SDK get_record_id sets id from
+    Contacts_{flow}.snapshot.csv (InputId = QBD ListID). Cold-start /
     name collisions: match existing company contacts by DisplayName via GET.
-    Enable flow ``save_ids_snapshots`` so ListID→Id persists across jobs.
+    Enable flow save_ids_snapshots so ListID→Id persists across jobs.
     """
 
     name = "Contacts"
@@ -33,7 +192,7 @@ class ContactsSink(ReLeasedRecordSink):
         self._exported_contacts_by_name: dict[str, str] = {}
 
     def preprocess_record(self, record: dict, context: dict) -> dict:
-        """Map SDK ``id`` → ``GlobalIdentifier``; inject CompanyId on create."""
+        """Map SDK id → GlobalIdentifier; inject CompanyId on create."""
         payload = self._apply_sdk_id(record, id_key="GlobalIdentifier")
         return self._with_company_id(payload, id_key="GlobalIdentifier")
 
@@ -89,7 +248,7 @@ class ContactsSink(ReLeasedRecordSink):
     def _contact_id_for_name(
         self, display_name: str | None, *, refresh: bool = False
     ) -> str | None:
-        """Resolve a ReLeased contact ``Id`` from DisplayName via GET /contacts."""
+        """Resolve a ReLeased contact Id from DisplayName via GET /contacts."""
         if not display_name:
             return None
         if refresh or self._contacts_by_name is None:
@@ -100,7 +259,7 @@ class ContactsSink(ReLeasedRecordSink):
         return self._contacts_by_name.get(display_name)
 
     def _load_contacts_by_name(self) -> dict[str, str]:
-        """Page GET ``/contacts`` for this Company into a name→Id map."""
+        """Page GET /contacts for this Company into a name→Id map."""
         by_name: dict[str, str] = {}
         params: dict[str, str] = {"companyId": self.config["company_id"]}
 
@@ -130,11 +289,11 @@ class ContactsSink(ReLeasedRecordSink):
 
 
 class InvoicesSink(ReLeasedRecordSink):
-    """Invoices sink — POST ``/invoices`` only (create; no updates).
+    """Invoices sink — POST /invoices only (create; no updates).
 
-    Covers both ACCREC (QBD invoices) and ACCPAY (QBD bills). ``externalId`` is
-    QBD TxnID; SDK snapshots map to ``Id`` so re-exports count as existing.
-    ``ContactId`` arrives as contact ListID and is resolved via ``relation_fields``.
+    Covers both ACCREC (QBD invoices) and ACCPAY (QBD bills). externalId is
+    QBD TxnID; SDK snapshots map to Id so re-exports count as existing.
+    ContactId arrives as contact ListID and is resolved via relation_fields.
     """
 
     name = "Invoices"
@@ -142,7 +301,7 @@ class InvoicesSink(ReLeasedRecordSink):
     relation_fields = _CONTACT_RELATION
 
     def preprocess_record(self, record: dict, context: dict) -> dict:
-        """Map SDK ``id`` → ``Id`` and inject CompanyId on create."""
+        """Map SDK id → Id and inject CompanyId on create."""
         payload = self._apply_sdk_id(record)
         return self._with_company_id(payload)
 
@@ -186,14 +345,14 @@ class InvoicesSink(ReLeasedRecordSink):
 
 
 class CreditNotesSink(ReLeasedRecordSink):
-    """CreditNotes sink — POST ``/credit-notes`` only (create; no updates)."""
+    """CreditNotes sink — POST /credit-notes only (create; no updates)."""
 
     name = "CreditNotes"
     endpoint = "/credit-notes"
     relation_fields = _CONTACT_RELATION
 
     def preprocess_record(self, record: dict, context: dict) -> dict:
-        """Map SDK ``id`` → ``Id`` and inject CompanyId on create."""
+        """Map SDK id → Id and inject CompanyId on create."""
         payload = self._apply_sdk_id(record)
         return self._with_company_id(payload)
 
@@ -212,11 +371,11 @@ class CreditNotesSink(ReLeasedRecordSink):
 
 
 class PaymentsSink(ReLeasedRecordSink):
-    """Payments sink — POST ``/payments`` only (create; no updates).
+    """Payments sink — POST /payments only (create; no updates).
 
-    ``InvoiceId`` arrives as the related QBD bill/invoice TxnID and is resolved
-    via ``relation_fields`` to a Re-Leased invoice uuid. ``externalId`` is
-    ``{paymentTxnId}:{appliedTxnId}`` so multi-application payments snapshot
+    InvoiceId arrives as the related QBD bill/invoice TxnID and is resolved
+    via relation_fields to a Re-Leased invoice uuid. externalId is
+    {paymentTxnId}:{appliedTxnId} so multi-application payments snapshot
     cleanly. CreatePayment does not take CompanyId (invoice scopes the company).
     """
 
@@ -225,7 +384,7 @@ class PaymentsSink(ReLeasedRecordSink):
     relation_fields = _INVOICE_RELATION
 
     def preprocess_record(self, record: dict, context: dict) -> dict:
-        """Map SDK ``id`` → ``Id`` for already-exported payments."""
+        """Map SDK id → Id for already-exported payments."""
         return self._apply_sdk_id(record)
 
     def upsert_record(self, record: dict, context: dict) -> tuple[Any, bool, dict]:
@@ -254,14 +413,14 @@ class PaymentsSink(ReLeasedRecordSink):
             raise FatalAPIError(msg) from exc
 
         body = response.json()
-        # Live API wraps create in ``Data``; swagger examples sometimes omit it.
+        # Live API wraps create in Data; swagger examples sometimes omit it.
         if isinstance(body.get("Data"), dict) and body["Data"].get("Id"):
             return body["Data"]["Id"], True, {}
         return body["Id"], True, {}
 
 
 class CreditNoteAllocationSink(ReLeasedRecordSink):
-    """CreditNoteAllocation sink — POST ``/credit-notes/{id}/allocations``."""
+    """CreditNoteAllocation sink — POST /credit-notes/{id}/allocations."""
 
     name = "CreditNoteAllocation"
     endpoint = "/credit-notes/"

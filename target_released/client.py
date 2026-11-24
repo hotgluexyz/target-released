@@ -35,7 +35,7 @@ def _format_released_errors(body: dict) -> list[str]:
 
 
 def format_released_api_error(response: requests.Response) -> str:
-    """Prefer Re-Leased ``Errors[].Code/Message`` over empty ``Detail`` JSON."""
+    """Prefer Re-Leased Errors[].Code/Message over empty Detail JSON."""
     text = (response.text or "").strip()
     try:
         body = response.json()
@@ -59,14 +59,14 @@ def format_released_api_error(response: requests.Response) -> str:
 
 
 class ReLeasedAuthenticator(BearerTokenAuthenticator):
-    """Bearer auth using ``access_token`` (same config key as tap-released)."""
+    """Bearer auth using access_token (same config key as tap-released)."""
 
     @property
     def auth_headers(self) -> dict:
         """Return Authorization headers for the ReLeased API.
 
         Returns:
-            Dict with a Bearer ``Authorization`` header.
+            Dict with a Bearer Authorization header.
         """
         return {"Authorization": f"Bearer {self._config['access_token']}"}
 
@@ -78,7 +78,7 @@ class ReLeasedSink(HotglueBaseSink):
     def base_url(self) -> str:
         """Return the ReLeased API base URL.
 
-        Hardcoded so Hotglue OAuth ``api_url`` (entity auth callback) cannot
+        Hardcoded so Hotglue OAuth api_url (entity auth callback) cannot
         override the destination host.
         """
         return "https://api.re-leased.com/api"
@@ -88,7 +88,7 @@ class ReLeasedSink(HotglueBaseSink):
         """Return the authenticator for outbound requests.
 
         Returns:
-            A ``ReLeasedAuthenticator`` bound to this target.
+            A ReLeasedAuthenticator bound to this target.
         """
         return ReLeasedAuthenticator(self._target)
 
@@ -97,12 +97,12 @@ class ReLeasedSink(HotglueBaseSink):
         """Return extra HTTP headers for each request.
 
         Returns:
-            Dict including a fresh ``Idempotency-Key``.
+            Dict including a fresh Idempotency-Key.
         """
         return {"Idempotency-Key": str(uuid.uuid4())}
 
     def validate_response(self, response: requests.Response) -> None:
-        """Raise with Re-Leased ``Errors[].Message`` (e.g. overpayment) visible."""
+        """Raise with Re-Leased Errors[].Message (e.g. overpayment) visible."""
         if (
             response.status_code == HTTPStatus.TOO_MANY_REQUESTS
             or response.status_code >= HTTPStatus.INTERNAL_SERVER_ERROR
@@ -113,7 +113,7 @@ class ReLeasedSink(HotglueBaseSink):
 
 
 class ReLeasedRecordSink(ReLeasedSink, HotglueSink):
-    """Record sink base. All writes are scoped to config ``company_id`` (a Company)."""
+    """Record sink base. All writes are scoped to config company_id (a Company)."""
 
     name = "ReLeasedRecordSink"
 
@@ -125,16 +125,16 @@ class ReLeasedRecordSink(ReLeasedSink, HotglueSink):
             context: SDK batch/context dict (unused here).
 
         Returns:
-            The same ``record`` dict.
+            The same record dict.
         """
         return record
 
     def _apply_sdk_id(self, record: dict, *, id_key: str = "Id") -> dict:
-        """Copy SDK ``id`` from id-snapshot lookup onto the ReLeased id field.
+        """Copy SDK id from id-snapshot lookup onto the ReLeased id field.
 
-        ``TargetHotglue.get_record_id`` sets lowercase ``id`` from
-        ``{stream}_{flow}.snapshot.csv``. ReLeased APIs use ``Id`` or
-        ``GlobalIdentifier``.
+        TargetHotglue.get_record_id sets lowercase id from
+        {stream}_{flow}.snapshot.csv. ReLeased APIs use Id or
+        GlobalIdentifier.
         """
         payload = dict(record)
         sdk_id = payload.pop("id", None)
@@ -143,33 +143,37 @@ class ReLeasedRecordSink(ReLeasedSink, HotglueSink):
         return payload
 
     def _with_company_id(self, record: dict, *, id_key: str = "Id") -> dict:
-        """Copy record and set CompanyId on create when ``id_key`` is absent.
+        """Copy record and set CompanyId on create when id_key is absent.
 
         Args:
             record: Sink record (contact, invoice, credit note, etc.).
-            id_key: Field that marks an existing ReLeased row. Default ``Id``;
-                contacts use ``GlobalIdentifier`` (the contact's API ``Id``).
+            id_key: Field that marks an existing ReLeased row. Default Id;
+                contacts use GlobalIdentifier (the contact's API Id).
 
         Returns:
-            A shallow copy of ``record``, with ``CompanyId`` set from config when
-            creating (no value at ``id_key``).
+            A shallow copy of record, with CompanyId set from config when
+            creating (no value at id_key).
         """
         payload = dict(record)
         if not payload.get(id_key):
             payload["CompanyId"] = self.config["company_id"]
         return payload
 
+    def _company_params(self) -> dict[str, str]:
+        """Query params for endpoints that take companyId (TaxTypes, accounts)."""
+        return {"companyId": self.config["company_id"]}
+
     def upsert_record(self, record: dict, context: dict) -> tuple[Any, bool, dict]:
-        """POST to create, or PUT when ``Id`` is present (ReLeased API convention).
+        """POST to create, or PUT when Id is present (ReLeased API convention).
 
         Args:
             record: Already-preprocessed payload for the destination API.
             context: SDK batch/context dict (unused here).
 
         Returns:
-            Tuple of ``(record_id, success, state_updates)`` where ``record_id``
-            is the ReLeased ``Id``, ``success`` is always True on HTTP success,
-            and ``state_updates`` may include ``is_updated``.
+            Tuple of (record_id, success, state_updates) where record_id
+            is the ReLeased Id, success is always True on HTTP success,
+            and state_updates may include is_updated.
         """
         state_updates: dict = {}
         method = "POST"
