@@ -10,6 +10,8 @@ from target_released.sinks import (
     CreditNotesSink,
     InvoicesSink,
     PaymentsSink,
+    TrackingCategoriesSink,
+    TrackingOptionsSink,
 )
 
 
@@ -18,6 +20,8 @@ class TargetReLeased(TargetHotglue):
 
     name = "target-released"
     SINK_TYPES = [
+        TrackingCategoriesSink,
+        TrackingOptionsSink,
         ContactsSink,
         CreditNotesSink,
         InvoicesSink,

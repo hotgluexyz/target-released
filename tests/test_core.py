@@ -13,4 +13,8 @@ SAMPLE_CONFIG = {
 def test_target_instantiates_with_required_config() -> None:
     target = TargetReLeased(config=SAMPLE_CONFIG)
     assert target.name == "target-released"
-    assert len(target.SINK_TYPES) == 5
+    assert len(target.SINK_TYPES) == 7
+    assert [cls.name for cls in target.SINK_TYPES[:2]] == [
+        "TrackingCategories",
+        "TrackingOptions",
+    ]
