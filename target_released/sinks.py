@@ -1,4 +1,4 @@
-"""ReLeased target sinks. Records are scoped to a Company (``company_id``)."""
+"""ReLeased target sinks. Records are scoped to a Company (company_id)."""
 
 from __future__ import annotations
 
@@ -12,6 +12,189 @@ from target_released.client import ReLeasedRecordSink
 # SDK relation_fields: ETL sets ContactId / InvoiceId to QBD externalIds.
 _CONTACT_RELATION = [{"field": "ContactId", "objectName": "Contacts"}]
 _INVOICE_RELATION = [{"field": "InvoiceId", "objectName": "Invoices"}]
+
+
+class TrackingCategoriesSink(ReLeasedRecordSink):
+    """TrackingCategories sink — POST /tracking-categories (create-if-missing)."""
+
+    name = "TrackingCategories"
+    endpoint = "/tracking-categories"
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._category_id_by_name: dict[str, str | None] | None = None
+
+    def preprocess_record(self, record: dict, context: dict) -> dict:
+        """Map SDK id to Id; company is query-scoped.
+
+        Args:
+            record: Singer TrackingCategories record.
+            context: SDK batch/context dict (unused).
+
+        Returns:
+            Record with SDK id mapped to Id when present.
+        """
+        return self._apply_sdk_id(record)
+
+    def upsert_record(self, record: dict, context: dict) -> tuple[Any, bool, dict]:
+        """Skip snapshot Id / existing Name; else POST with companyId query.
+
+        Args:
+            record: Preprocessed tracking category payload (Name required).
+            context: SDK batch/context dict (unused).
+
+        Returns:
+            Tuple of (record_id, success, state_updates).
+        """
+        if record.get("Id"):
+            self.logger.info(
+                "Skipping tracking category already exported Id=%s Name=%s",
+                record.get("Id"),
+                record.get("Name"),
+            )
+            return record["Id"], True, {"existing": True}
+
+        name = record["Name"]
+        category_id_by_name = self._ensure_category_ids_by_name()
+        name_key = str(name).casefold()
+        if name_key in category_id_by_name:
+            existing_id = category_id_by_name[name_key]
+            self.logger.info(
+                "Skipping tracking category already in company Id=%s Name=%s",
+                existing_id,
+                name,
+            )
+            return existing_id or name, True, {"existing": True}
+
+        response = self.request_api(
+            "POST",
+            endpoint=self.endpoint,
+            params=self._company_params(),
+            request_data={"Name": name},
+        )
+
+        data = response.json()["Data"]
+        record_id = data.get("Id") or name
+        category_id_by_name[name_key] = data.get("Id")
+        return record_id, True, {}
+
+    def _ensure_category_ids_by_name(self) -> dict[str, str | None]:
+        """Load category Name→Id map for this company (lazy).
+
+        Returns:
+            Case-insensitive Name → Id map (Id may be None on legacy tracking).
+        """
+        if self._category_id_by_name is None:
+            self._category_id_by_name = {}
+            for row in self._page_company_rows(self.endpoint):
+                row_name = row.get("Name")
+                if row_name:
+                    self._category_id_by_name[str(row_name).casefold()] = row.get("Id")
+        return self._category_id_by_name
+
+
+class TrackingOptionsSink(ReLeasedRecordSink):
+    """TrackingOptions sink — POST /tracking-options (create-if-missing)."""
+
+    name = "TrackingOptions"
+    endpoint = "/tracking-options"
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        # category_casefold → name_casefold → Id
+        self._option_id_by_category: dict[str, dict[str, str]] | None = None
+
+    def preprocess_record(self, record: dict, context: dict) -> dict:
+        """Map SDK id to Id; company is query-scoped.
+
+        Args:
+            record: Singer TrackingOptions record.
+            context: SDK batch/context dict (unused).
+
+        Returns:
+            Record with SDK id mapped to Id when present.
+        """
+        return self._apply_sdk_id(record)
+
+    def upsert_record(self, record: dict, context: dict) -> tuple[Any, bool, dict]:
+        """Skip snapshot Id / existing Name; else POST with companyId query.
+
+        Args:
+            record: Preprocessed option payload (Category, Name; optional Parent).
+            context: SDK batch/context dict (unused).
+
+        Returns:
+            Tuple of (record_id, success, state_updates).
+        """
+        if record.get("Id"):
+            self.logger.info(
+                "Skipping tracking option already exported Id=%s Name=%s",
+                record.get("Id"),
+                record.get("Name"),
+            )
+            return record["Id"], True, {"existing": True}
+
+        category = record["Category"]
+        name = record["Name"]
+        existing_id = self._option_id(category, name)
+        if existing_id:
+            self.logger.info(
+                "Skipping tracking option already in company Id=%s Category=%s Name=%s",
+                existing_id,
+                category,
+                name,
+            )
+            return existing_id, True, {"existing": True}
+
+        payload: dict[str, Any] = {"Category": category, "Name": name}
+        parent = record.get("Parent")
+        if parent:
+            payload["Parent"] = parent
+
+        response = self.request_api(
+            "POST",
+            endpoint=self.endpoint,
+            params=self._company_params(),
+            request_data=payload,
+        )
+
+        record_id = response.json()["Data"]["Id"]
+        if self._option_id_by_category is not None:
+            option_ids_for_category = self._option_id_by_category.setdefault(
+                str(category).casefold(), {}
+            )
+            option_ids_for_category[str(name).casefold()] = record_id
+        return record_id, True, {}
+
+    def _option_id(self, category: str, name: str) -> str | None:
+        """Resolve an option Id by category and Name/Path.
+
+        Args:
+            category: Tracking category name.
+            name: Option Name (or Path) to look up.
+
+        Returns:
+            Existing option Id, or None if not found.
+        """
+        if self._option_id_by_category is None:
+            self._option_id_by_category = {}
+        category_key = str(category).casefold()
+        if category_key not in self._option_id_by_category:
+            loaded_tracking_options: dict[str, str] = {}
+            for row in self._page_company_rows(
+                self.endpoint, extra_params={"category": category}
+            ):
+                row_id = row.get("Id")
+                if not row_id:
+                    continue
+                row_name = row.get("Name")
+                if row_name:
+                    loaded_tracking_options[str(row_name).casefold()] = row_id
+                path = row.get("Path")
+                if path:
+                    loaded_tracking_options[str(path).casefold()] = row_id
+            self._option_id_by_category[category_key] = loaded_tracking_options
+        return self._option_id_by_category[category_key].get(str(name).casefold())
 
 
 class ContactsSink(ReLeasedRecordSink):
