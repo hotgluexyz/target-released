@@ -86,11 +86,12 @@ class TrackingCategoriesSink(ReLeasedRecordSink):
             Case-insensitive Name → Id map (Id may be None on legacy tracking).
         """
         if self._category_id_by_name is None:
-            self._category_id_by_name = {}
+            category_id_by_name: dict[str, str | None] = {}
             for row in self._page_company_rows(self.endpoint):
                 row_name = row.get("Name")
                 if row_name:
-                    self._category_id_by_name[str(row_name).casefold()] = row.get("Id")
+                    category_id_by_name[str(row_name).casefold()] = row.get("Id")
+            self._category_id_by_name = category_id_by_name
         return self._category_id_by_name
 
 
