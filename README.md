@@ -23,7 +23,7 @@ This project was generated from the Hotglue target cookiecutter with:
 ## Configuration
 
 Settings are defined in `config_jsonschema` on `TargetReLeased` in `target_released/target.py`.
-Config matches tap-released: `access_token`, `company_id`, and optional `api_url`.
+Config matches tap-released: `access_token` and `company_id`. API base URL is hardcoded in `client.py`.
 
 Inspect the live schema:
 

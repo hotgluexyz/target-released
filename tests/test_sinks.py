@@ -112,14 +112,14 @@ def test_contacts_global_identifier_export_does_not_block_company_map_load():
         {},
     )
     assert (id_ada, state_ada.get("is_updated")) == ("id-ada", True)
-    assert sink._contacts_by_name is None
-    assert sink._exported_contacts_by_name["Ada"] == "id-ada"
+    assert sink._contacts_by_name is None  # noqa: SLF001
+    assert sink._exported_contacts_by_name["Ada"] == "id-ada"  # noqa: SLF001
     assert get_calls["n"] == 0
 
     id_bob, _, state_bob = sink.upsert_record({"DisplayName": "Bob"}, {})
     assert (id_bob, state_bob.get("is_updated")) == ("id-bob", True)
     assert get_calls["n"] == 1
-    assert sink._contacts_by_name == {"Bob": "id-bob", "Ada": "id-ada"}
+    assert sink._contacts_by_name == {"Bob": "id-bob", "Ada": "id-ada"}  # noqa: SLF001
 
 
 def test_contacts_upsert_create_returns_data_id():
@@ -395,7 +395,7 @@ def test_tracking_categories_post_uses_company_id_query():
     assert "CompanyId" not in payload
     record_id, success, state = sink.upsert_record(payload, {})
     assert (record_id, success, state) == ("cat-1", True, {})
-    post = [c for c in request_api.call_args_list if c.args[0] == "POST"][0]
+    post = next(c for c in request_api.call_args_list if c.args[0] == "POST")
     assert post.kwargs["params"] == {"companyId": COMPANY_ID}
     assert post.kwargs["request_data"] == {"Name": "Class"}
 
@@ -437,7 +437,7 @@ def test_tracking_options_post_with_parent():
         {},
     )
     assert (record_id, success, state) == ("opt-1", True, {})
-    post = [c for c in request_api.call_args_list if c.args[0] == "POST"][0]
+    post = next(c for c in request_api.call_args_list if c.args[0] == "POST")
     assert post.kwargs["params"] == {"companyId": COMPANY_ID}
     assert post.kwargs["request_data"] == {
         "Category": "Class",

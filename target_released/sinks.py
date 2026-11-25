@@ -21,6 +21,7 @@ class TrackingCategoriesSink(ReLeasedRecordSink):
     endpoint = "/tracking-categories"
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
+        """Initialize sink and an unloaded category Name→Id cache."""
         super().__init__(*args, **kwargs)
         self._category_id_by_name: dict[str, str | None] | None = None
 
@@ -100,6 +101,7 @@ class TrackingOptionsSink(ReLeasedRecordSink):
     endpoint = "/tracking-options"
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
+        """Initialize sink and an unloaded option Id-by-category cache."""
         super().__init__(*args, **kwargs)
         # category_casefold → name_casefold → Id
         self._option_id_by_category: dict[str, dict[str, str]] | None = None
