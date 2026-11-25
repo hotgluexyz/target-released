@@ -446,6 +446,66 @@ def test_tracking_options_post_with_parent():
     }
 
 
+def test_tracking_options_skip_existing_parent_and_name():
+    def side_effect(method, endpoint=None, params=None, request_data=None, **kwargs):
+        response = MagicMock()
+        response.json.return_value = {
+            "Data": [
+                {
+                    "Id": "opt-exist",
+                    "Name": "BK-CHILD-CLASS",
+                    "Parent": "BK-Test-Class",
+                }
+            ],
+            "MetaData": {},
+        }
+        return response
+
+    request_api = MagicMock(side_effect=side_effect)
+    sink = _make_sink(TrackingOptionsSink, request_api=request_api)
+    record_id, _, state = sink.upsert_record(
+        {
+            "Category": "Class",
+            "Name": "BK-CHILD-CLASS",
+            "Parent": "BK-Test-Class",
+        },
+        {},
+    )
+    assert (record_id, state) == ("opt-exist", {"existing": True})
+    assert all(c.args[0] != "POST" for c in request_api.call_args_list)
+
+
+def test_tracking_options_same_name_different_parent_still_posts():
+    posts: list[dict] = []
+
+    def side_effect(method, endpoint=None, params=None, request_data=None, **kwargs):
+        response = MagicMock()
+        if method == "GET":
+            response.json.return_value = {
+                "Data": [
+                    {
+                        "Id": "opt-a",
+                        "Name": "East",
+                        "Parent": "Region-A",
+                    }
+                ],
+                "MetaData": {},
+            }
+            return response
+        posts.append(request_data)
+        response.json.return_value = {"Data": {"Id": "opt-b", "Name": "East"}}
+        return response
+
+    request_api = MagicMock(side_effect=side_effect)
+    sink = _make_sink(TrackingOptionsSink, request_api=request_api)
+    record_id, success, state = sink.upsert_record(
+        {"Category": "Class", "Name": "East", "Parent": "Region-B"},
+        {},
+    )
+    assert (record_id, success, state) == ("opt-b", True, {})
+    assert posts == [{"Category": "Class", "Name": "East", "Parent": "Region-B"}]
+
+
 def test_format_released_api_error_prefers_errors_message():
     body = {
         "Title": "Bad request",

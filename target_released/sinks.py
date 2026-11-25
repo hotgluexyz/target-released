@@ -104,8 +104,8 @@ class TrackingOptionsSink(ReLeasedRecordSink):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         """Initialize sink and an unloaded option Id-by-category cache."""
         super().__init__(*args, **kwargs)
-        # category_casefold → name_casefold → Id
-        self._option_id_by_category: dict[str, dict[str, str]] | None = None
+        # category_casefold → (parent_casefold, name_casefold) → Id
+        self._option_id_by_category: dict[str, dict[tuple[str, str], str]] | None = None
 
     def preprocess_record(self, record: dict, context: dict) -> dict:
         """Map SDK id to Id; company is query-scoped.
@@ -120,7 +120,7 @@ class TrackingOptionsSink(ReLeasedRecordSink):
         return self._apply_sdk_id(record)
 
     def upsert_record(self, record: dict, context: dict) -> tuple[Any, bool, dict]:
-        """Skip snapshot Id / existing Name; else POST with companyId query.
+        """Skip snapshot Id / existing Parent+Name; else POST with companyId query.
 
         Args:
             record: Preprocessed option payload (Category, Name; optional Parent).
@@ -139,18 +139,20 @@ class TrackingOptionsSink(ReLeasedRecordSink):
 
         category = record["Category"]
         name = record["Name"]
-        existing_id = self._option_id(category, name)
+        parent = record.get("Parent")
+        existing_id = self._option_id(category, name, parent)
         if existing_id:
             self.logger.info(
-                "Skipping tracking option already in company Id=%s Category=%s Name=%s",
+                "Skipping tracking option already in company Id=%s "
+                "Category=%s Parent=%s Name=%s",
                 existing_id,
                 category,
+                parent,
                 name,
             )
             return existing_id, True, {"existing": True}
 
         payload: dict[str, Any] = {"Category": category, "Name": name}
-        parent = record.get("Parent")
         if parent:
             payload["Parent"] = parent
 
@@ -166,15 +168,23 @@ class TrackingOptionsSink(ReLeasedRecordSink):
             option_ids_for_category = self._option_id_by_category.setdefault(
                 str(category).casefold(), {}
             )
-            option_ids_for_category[str(name).casefold()] = record_id
+            option_ids_for_category[self._option_cache_key(parent, name)] = record_id
         return record_id, True, {}
 
-    def _option_id(self, category: str, name: str) -> str | None:
-        """Resolve an option Id by category and Name/Path.
+    @staticmethod
+    def _option_cache_key(parent: str | None, name: str) -> tuple[str, str]:
+        """Cache key distinguishing options by parent and leaf name."""
+        return (str(parent or "").casefold(), str(name).casefold())
+
+    def _option_id(
+        self, category: str, name: str, parent: str | None = None
+    ) -> str | None:
+        """Resolve an option Id by category, Parent, and Name.
 
         Args:
             category: Tracking category name.
-            name: Option Name (or Path) to look up.
+            name: Option Name to look up.
+            parent: Parent option Name, or None for a top-level option.
 
         Returns:
             Existing option Id, or None if not found.
@@ -183,21 +193,21 @@ class TrackingOptionsSink(ReLeasedRecordSink):
             self._option_id_by_category = {}
         category_key = str(category).casefold()
         if category_key not in self._option_id_by_category:
-            loaded_tracking_options: dict[str, str] = {}
+            loaded_tracking_options: dict[tuple[str, str], str] = {}
             for row in self._page_company_rows(
                 self.endpoint, extra_params={"category": category}
             ):
                 row_id = row.get("Id")
-                if not row_id:
-                    continue
                 row_name = row.get("Name")
-                if row_name:
-                    loaded_tracking_options[str(row_name).casefold()] = row_id
-                path = row.get("Path")
-                if path:
-                    loaded_tracking_options[str(path).casefold()] = row_id
+                if not row_id or not row_name:
+                    continue
+                loaded_tracking_options[
+                    self._option_cache_key(row.get("Parent"), row_name)
+                ] = row_id
             self._option_id_by_category[category_key] = loaded_tracking_options
-        return self._option_id_by_category[category_key].get(str(name).casefold())
+        return self._option_id_by_category[category_key].get(
+            self._option_cache_key(parent, name)
+        )
 
 
 class ContactsSink(ReLeasedRecordSink):
